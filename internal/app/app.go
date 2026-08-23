@@ -37,13 +37,13 @@ func Init() error {
 		}
 	}()
 
-	slog.Info("todo app started")
+	slog.Info("post stats service started")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	<-ctx.Done()
 
-	slog.Info("todo app shutting down")
+	slog.Info("post stats service shutting down")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -52,7 +52,7 @@ func Init() error {
 		slog.Error("error occured on server shutting down: ", "err", err)
 	}
 
-	slog.Info("todo app stopped")
+	slog.Info("post stats service stopped")
 
 	return nil
 }
