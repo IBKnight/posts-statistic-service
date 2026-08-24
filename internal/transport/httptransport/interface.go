@@ -1,7 +1,29 @@
 package httptransport
 
-import "github.com/IBKnight/posts-statistic-service/internal/domain"
+import "github.com/IBKnight/posts-statistic-service/internal/storage"
 
-type CalculationService interface {
-	CalculatePostStatistic(postID int) (domain.PostStatistic, error)
+type Store interface {
+	Get(postID int64) (storage.PostStats, bool)
+	Snapshot(dst []storage.PostStats) []storage.PostStats
+	Count() int
+	Owns(postID int64) bool
+	BaseID() int64
+	MaxID() int64
+}
+
+type Readiness interface {
+	Ready() (ready bool, lag int64)
+}
+
+type ReadinessFunc func() (bool, int64)
+
+func (f ReadinessFunc) Ready() (bool, int64) {
+	return f()
+}
+
+// TODO: change for real readiness from kafka consumer
+func AlwaysReady() Readiness {
+	return ReadinessFunc(func() (bool, int64) {
+		return true, 0
+	})
 }
