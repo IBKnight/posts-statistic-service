@@ -24,7 +24,7 @@ type Store struct {
 	buckets [BucketsNum]sync.RWMutex
 }
 
-func New(baseID int64) *Store {
+func NewStore(baseID int64) *Store {
 	return &Store{
 		baseID: baseID,
 		slots:  make([]PostStats, ShardSize),
@@ -32,7 +32,7 @@ func New(baseID int64) *Store {
 }
 
 func NewForShard(ordinal int) *Store {
-	return New(BaseIDForShard(ordinal))
+	return NewStore(BaseIDForShard(ordinal))
 }
 
 func BaseIDForShard(ordinal int) int64 {
