@@ -1,1 +1,20 @@
 port: "8080"
+
+shard:
+  ordinal: 0
+
+kafka:
+  brokers:
+    - "localhost:9092"
+  topic: "post-events"
+  lag_threshold: 1000
+
+snapshot:
+  backup_interval: "1h"
+
+minio:
+  endpoint: "localhost:9000"
+  access_key: "minioadmin"
+  secret_key: "minioadmin" # here for local start
+  bucket: "post-stats"
+  use_ssl: false
