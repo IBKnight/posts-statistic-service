@@ -2,10 +2,10 @@
 .PHONY: run build test lint tidy
 
 run:
-	go run ./cmd/app
+	go run ./cmd/shard
 
 build:
-	go build -o ./bin/app ./cmd/app
+	go build -o ./bin/shard ./cmd/shard
 
 test:
 	go test ./... -race -count=1
