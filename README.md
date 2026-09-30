@@ -3,7 +3,7 @@ service for real-time post statistic calculation
 
 ## Local development
 
-`docker compose up --build` brings up a full local stack: single-node Kafka (KRaft), MinIO, and two shards (`shard-0`, `shard-1`). A one-shot `kafka-init` service creates the `post-events` topic with 2 partitions — matching the 2 shards, per the partitioning contract below. Bump both together if you add a third shard.
+`docker compose up --build` brings up a full local stack: single-node Kafka (KRaft), MinIO, two shards (`shard-0`, `shard-1`), and a Prometheus + Grafana pair scraping both shards' `/metrics`. A one-shot `kafka-init` service creates the `post-events` topic with 2 partitions — matching the 2 shards, per the partitioning contract below. Bump both together if you add a third shard (and add it to `configs/prometheus.yml`'s target list).
 
 Per-shard endpoints are published on different host ports so you can poke each one directly:
 
@@ -11,6 +11,8 @@ Per-shard endpoints are published on different host ports so you can poke each o
 |---|---|---|
 | shard-0 | `localhost:8081` | `localhost:9081` |
 | shard-1 | `localhost:8082` | `localhost:9082` |
+
+Grafana is at **`localhost:3000`** (`admin` / `admin`, default Grafana login — change it if this ever leaves your machine). It already has a `Prometheus` datasource provisioned (`configs/grafana/provisioning/datasources`), pointed at Prometheus, which is at `localhost:9090` and scrapes `shard-0:9090`/`shard-1:9090` every 5s per `configs/prometheus.yml`. A "posts-statistic-service" dashboard is auto-provisioned (`configs/grafana/provisioning/dashboards`) covering every metric in "Operability signals" below, one panel each, broken out by `shard`.
 
 This is the environment to use for anything involving restart/restore behavior — it's not meaningfully testable any other way. A quick manual check:
 
@@ -25,6 +27,23 @@ curl localhost:9081/api/dump                  # same state, not lost, not double
 ```
 
 Note that `kafka-console-producer` doesn't implement this service's partitioner, so a given event may land on either partition — that's fine for exercising restart/restore, but see "Sharding & the producer contract" for what a real producer must do.
+
+## Generating traffic
+
+`cmd/traffic-gen` produces synthetic events at a configurable rate, partitioning each one the same way the service does (`storage.ShardForPostID`), so it respects the sharding contract instead of relying on luck like the single `kafka-console-producer` example above. It also occasionally resends a recent `EventID` (`-dup-rate`) to exercise dedup, and can inject malformed payloads (`-bad-rate`) to exercise `post_stats_events_failed`.
+
+It's wired into `docker-compose.yml` as a `tools`-profile service, since it has to run inside the compose network — `kafka`'s advertised listener (`kafka:9092`) only resolves there, not from the host:
+
+```sh
+docker compose run --rm traffic-gen -brokers=kafka:9092 -topic=post-events -shards=2 -rate=200 -duration=30s
+```
+
+Flags: `-brokers`, `-topic`, `-shards` (must match the topic's partition count), `-rate` (events/sec), `-duration` (0 = run until interrupted), `-post-id-min`, `-dup-rate`, `-bad-rate`, `-seed`, `-log-every`. Watch it land with:
+
+```sh
+curl localhost:9081/api/status   # shard-0
+curl localhost:9082/api/status   # shard-1
+```
 
 ## Sharding & the producer contract
 
