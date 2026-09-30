@@ -9,12 +9,22 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 
 	"github.com/IBKnight/posts-statistic-service/internal/snapshot"
 	"github.com/IBKnight/posts-statistic-service/internal/storage"
 )
 
 const offsetUnset int64 = -1
+
+// lagRefreshInterval bounds how stale "ready" can be on an idle partition.
+// PollFetches only reports a partition (and its high watermark) when there
+// are new records to hand back — on an idle partition it keeps returning
+// empty Fetches forever, so updateLag would never run and /readyz would
+// stay "not ready" indefinitely even though the shard is fully caught up.
+// This ticker asks the broker for the watermark directly, independent of
+// whether anything new was produced.
+const lagRefreshInterval = 5 * time.Second
 
 type Config struct {
 	Brokers        []string
@@ -42,6 +52,9 @@ type Consumer struct {
 	skipped   atomic.Uint64
 	duplicate atomic.Uint64
 	failed    atomic.Uint64
+
+	lastBackupUnix     atomic.Int64
+	lastBackupDuration atomic.Int64 // nanoseconds
 }
 
 func New(cfg Config, store Store, snaps Snapshots) (*Consumer, error) {
@@ -80,8 +93,17 @@ func (c *Consumer) Ready() (bool, int64) {
 	return lag <= c.cfg.LagThreshold, lag
 }
 
-func (c *Consumer) Stats() (applied, skipped, failed uint64) {
-	return c.applied.Load(), c.skipped.Load(), c.failed.Load()
+func (c *Consumer) Applied() uint64   { return c.applied.Load() }
+func (c *Consumer) Skipped() uint64   { return c.skipped.Load() }
+func (c *Consumer) Duplicate() uint64 { return c.duplicate.Load() }
+func (c *Consumer) Failed() uint64    { return c.failed.Load() }
+
+func (c *Consumer) LastBackupUnix() int64 {
+	return c.lastBackupUnix.Load()
+}
+
+func (c *Consumer) LastBackupDurationSeconds() float64 {
+	return time.Duration(c.lastBackupDuration.Load()).Seconds()
 }
 
 func (c *Consumer) Run(ctx context.Context) error {
@@ -108,8 +130,13 @@ func (c *Consumer) Run(ctx context.Context) error {
 		"offset", c.offset,
 	)
 
+	c.refreshLag(ctx, client)
+
 	backups := time.NewTicker(c.cfg.BackupInterval)
 	defer backups.Stop()
+
+	lagRefresh := time.NewTicker(lagRefreshInterval)
+	defer lagRefresh.Stop()
 
 	for {
 		fetches := client.PollFetches(ctx)
@@ -134,6 +161,42 @@ func (c *Consumer) Run(ctx context.Context) error {
 		case <-backups.C:
 			c.enqueueBackup()
 		default:
+		}
+
+		select {
+		case <-lagRefresh.C:
+			c.refreshLag(ctx, client)
+		default:
+		}
+	}
+}
+
+// refreshLag asks the broker for this partition's current high watermark
+// directly, independent of PollFetches — see lagRefreshInterval.
+func (c *Consumer) refreshLag(ctx context.Context, client *kgo.Client) {
+	req := kmsg.NewPtrListOffsetsRequest()
+	req.Topics = []kmsg.ListOffsetsRequestTopic{{
+		Topic: c.cfg.Topic,
+		Partitions: []kmsg.ListOffsetsRequestTopicPartition{{
+			Partition:          c.cfg.Partition,
+			CurrentLeaderEpoch: -1,
+			Timestamp:          -1, // latest
+			MaxNumOffsets:      1,
+		}},
+	}}
+
+	resp, err := req.RequestWith(ctx, client)
+	if err != nil {
+		slog.Debug("failed to refresh kafka watermark", "err", err)
+		return
+	}
+
+	for _, t := range resp.Topics {
+		for _, p := range t.Partitions {
+			if p.Partition != c.cfg.Partition || p.ErrorCode != 0 {
+				continue
+			}
+			c.updateLag(p.Offset)
 		}
 	}
 }
@@ -239,10 +302,16 @@ func (c *Consumer) uploadLoop() {
 	for data := range c.uploads {
 		ctx, cancel := context.WithTimeout(context.Background(), c.cfg.UploadTimeout)
 
-		if err := c.snaps.Backup(ctx, data); err != nil {
+		start := time.Now()
+		err := c.snaps.Backup(ctx, data)
+		dur := time.Since(start)
+
+		if err != nil {
 			slog.Error("failed to save backup", "err", err)
 		} else {
-			slog.Debug("backup saved", "bytes", len(data))
+			c.lastBackupUnix.Store(time.Now().Unix())
+			c.lastBackupDuration.Store(int64(dur))
+			slog.Debug("backup saved", "bytes", len(data), "duration", dur)
 		}
 
 		cancel()
@@ -256,9 +325,15 @@ func (c *Consumer) finish() {
 	} else {
 		ctx, cancel := context.WithTimeout(context.Background(), c.cfg.UploadTimeout)
 
-		if err := c.snaps.Backup(ctx, data); err != nil {
+		start := time.Now()
+		err := c.snaps.Backup(ctx, data)
+		dur := time.Since(start)
+
+		if err != nil {
 			slog.Error("failed to save final backup", "err", err)
 		} else {
+			c.lastBackupUnix.Store(time.Now().Unix())
+			c.lastBackupDuration.Store(int64(dur))
 			slog.Info("final backup saved", "offset", c.offset)
 		}
 

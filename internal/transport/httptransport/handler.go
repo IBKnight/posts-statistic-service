@@ -1,11 +1,17 @@
 package httptransport
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/IBKnight/posts-statistic-service/internal/storage"
 )
+
+// maxBatchIDs caps GET /api/post_stats so one query string can't force a
+// pass over an unbounded number of ids.
+const maxBatchIDs = 500
 
 type Handler struct {
 	store     Store
@@ -23,14 +29,29 @@ func NewHandler(store Store, readiness Readiness) *Handler {
 	}
 }
 
-func (h *Handler) InitRoutes() http.Handler {
+// InitPublicRoutes serves what external clients and k8s probes need. It is
+// safe to expose behind an Ingress/Service.
+func (h *Handler) InitPublicRoutes() *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/post_stat/{id}", h.getPostStatistic)
-	mux.HandleFunc("GET /api/dump", h.getDump)
-	mux.HandleFunc("GET /api/status", h.getStatus)
+	mux.HandleFunc("GET /api/post_stats", h.getPostStats)
 	mux.HandleFunc("GET /healthz", h.getLive)
 	mux.HandleFunc("GET /readyz", h.getReady)
+
+	return mux
+}
+
+// InitInternalRoutes serves operational endpoints only: /api/dump and
+// /api/status both snapshot the whole shard and take a lock across every
+// bucket, so they must not sit on a publicly reachable port. Callers mount
+// this on a separate, cluster-internal port (see cmd/shard wiring), typically
+// alongside /metrics.
+func (h *Handler) InitInternalRoutes() *http.ServeMux {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /api/dump", h.getDump)
+	mux.HandleFunc("GET /api/status", h.getStatus)
 
 	return mux
 }
@@ -67,6 +88,61 @@ func (h *Handler) getPostStatistic(w http.ResponseWriter, r *http.Request) {
 		Likes:   stats.Likes,
 		Shares:  stats.Shares,
 		Reports: stats.Reports,
+	})
+}
+
+// getPostStats is the batch counterpart of getPostStatistic: GET
+// /api/post_stats?ids=1,2,3. Ids that don't belong to this shard, or that
+// don't exist, are silently omitted from the response — same as GetMany.
+func (h *Handler) getPostStats(w http.ResponseWriter, r *http.Request) {
+	raw := r.URL.Query().Get("ids")
+	if raw == "" {
+		writeError(w, http.StatusBadRequest, "ids query parameter is required")
+		return
+	}
+
+	parts := strings.Split(raw, ",")
+	if len(parts) > maxBatchIDs {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("too many ids: max %d per request", maxBatchIDs))
+		return
+	}
+
+	ids := make([]int64, 0, len(parts))
+	for _, p := range parts {
+		id, err := strconv.ParseInt(strings.TrimSpace(p), 10, 64)
+		if err != nil || id <= 0 {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid post id %q", strings.TrimSpace(p)))
+			return
+		}
+		ids = append(ids, id)
+	}
+
+	if ready, _ := h.readiness.Ready(); !ready {
+		writeError(w, http.StatusServiceUnavailable, "shard is still catching up")
+		return
+	}
+
+	found := h.store.GetMany(ids)
+	posts := make([]postStatResponse, 0, len(found))
+
+	for _, id := range ids {
+		stats, ok := found[id]
+		if !ok {
+			continue
+		}
+
+		posts = append(posts, postStatResponse{
+			PostID:  id,
+			Views:   stats.Views,
+			Likes:   stats.Likes,
+			Shares:  stats.Shares,
+			Reports: stats.Reports,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, postStatsResponse{
+		Count: len(posts),
+		Posts: posts,
 	})
 }
 

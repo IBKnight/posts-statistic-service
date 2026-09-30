@@ -4,6 +4,7 @@ import "github.com/IBKnight/posts-statistic-service/internal/storage"
 
 type Store interface {
 	Get(postID int64) (storage.PostStats, bool)
+	GetMany(postIDs []int64) map[int64]storage.PostStats
 	Snapshot(dst []storage.PostStats) []storage.PostStats
 	Count() int
 	Owns(postID int64) bool

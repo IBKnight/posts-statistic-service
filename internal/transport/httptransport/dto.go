@@ -8,6 +8,11 @@ type postStatResponse struct {
 	Reports uint32 `json:"reports"`
 }
 
+type postStatsResponse struct {
+	Count int                `json:"count"`
+	Posts []postStatResponse `json:"posts"`
+}
+
 type dumpResponse struct {
 	BaseID int64              `json:"base_id"`
 	MaxID  int64              `json:"max_id"`

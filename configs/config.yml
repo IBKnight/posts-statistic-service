@@ -1,4 +1,11 @@
 port: "8080"
+# internal_port serves /api/dump, /api/status and /metrics. It must NOT be
+# published by the k8s Service/Ingress in front of this deployment — those
+# handlers snapshot the whole shard under lock and have no auth of their own.
+internal_port: "9090"
+
+log:
+  level: "info"
 
 shard:
   ordinal: 0

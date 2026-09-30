@@ -16,6 +16,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/spf13/viper"
 
+	"github.com/IBKnight/posts-statistic-service/internal/metrics"
 	"github.com/IBKnight/posts-statistic-service/internal/snapshot"
 	"github.com/IBKnight/posts-statistic-service/internal/storage"
 	"github.com/IBKnight/posts-statistic-service/internal/transport/httptransport"
@@ -30,6 +31,8 @@ func Init() error {
 	if err := initConfig(); err != nil {
 		return fmt.Errorf("error occured while configs init: %w", err)
 	}
+
+	configureLogging()
 
 	ordinal, err := shardOrdinal()
 	if err != nil {
@@ -82,9 +85,15 @@ func Init() error {
 	}()
 
 	port := viper.GetString("port")
+	internalPort := viper.GetString("internal_port")
 
 	h := httptransport.NewHandler(store, cons)
-	srv := NewServer(port, h.InitRoutes())
+
+	srv := NewServer(port, h.InitPublicRoutes())
+
+	internalMux := h.InitInternalRoutes()
+	internalMux.Handle("/metrics", metrics.Handler(ordinal, store, cons))
+	internalSrv := NewServer(internalPort, internalMux)
 
 	go func() {
 		if err := srv.Run(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -92,7 +101,13 @@ func Init() error {
 		}
 	}()
 
-	slog.Info("posts statistic service started", "port", port)
+	go func() {
+		if err := internalSrv.Run(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("error occured while running internal http server", "err", err)
+		}
+	}()
+
+	slog.Info("posts statistic service started", "port", port, "internal_port", internalPort)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -107,15 +122,18 @@ func Init() error {
 		slog.Error("error occured on server shutting down", "err", err)
 	}
 
+	if err := internalSrv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("error occured on internal server shutting down", "err", err)
+	}
+
 	stopConsumer()
 	<-consumerDone
 
-	applied, skipped, failed := cons.Stats()
-
 	slog.Info("posts statistic service stopped",
-		"applied", applied,
-		"skipped", skipped,
-		"failed", failed,
+		"applied", cons.Applied(),
+		"skipped", cons.Skipped(),
+		"duplicate", cons.Duplicate(),
+		"failed", cons.Failed(),
 	)
 
 	return nil
@@ -150,6 +168,19 @@ func shardOrdinal() (int, error) {
 	}
 
 	return ordinal, nil
+}
+
+func configureLogging() {
+	level := slog.LevelInfo
+
+	if raw := viper.GetString("log.level"); raw != "" {
+		if err := level.UnmarshalText([]byte(raw)); err != nil {
+			slog.Warn("unknown log level, defaulting to info", "level", raw)
+			level = slog.LevelInfo
+		}
+	}
+
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 }
 
 func initConfig() error {
