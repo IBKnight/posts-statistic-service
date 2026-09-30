@@ -25,3 +25,6 @@ minio:
   secret_key: "minioadmin" # here for local start
   bucket: "post-stats"
   use_ssl: false
+  # backups accumulate at one object/backup_interval per shard forever unless
+  # bounded here; 0 disables expiry.
+  backup_retention_days: 30

@@ -51,12 +51,13 @@ func Init() error {
 	defer cancelStartup()
 
 	snaps, err := snapshot.NewMinioStore(startupCtx, snapshot.MinioConfig{
-		Endpoint:  viper.GetString("minio.endpoint"),
-		AccessKey: viper.GetString("minio.access_key"),
-		SecretKey: viper.GetString("minio.secret_key"),
-		Bucket:    viper.GetString("minio.bucket"),
-		UseSSL:    viper.GetBool("minio.use_ssl"),
-		Ordinal:   ordinal,
+		Endpoint:            viper.GetString("minio.endpoint"),
+		AccessKey:           viper.GetString("minio.access_key"),
+		SecretKey:           viper.GetString("minio.secret_key"),
+		Bucket:              viper.GetString("minio.bucket"),
+		UseSSL:              viper.GetBool("minio.use_ssl"),
+		Ordinal:             ordinal,
+		BackupRetentionDays: viper.GetInt("minio.backup_retention_days"),
 	})
 	if err != nil {
 		return fmt.Errorf("error occured while minio init: %w", err)
