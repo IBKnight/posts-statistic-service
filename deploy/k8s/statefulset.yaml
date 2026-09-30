@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: posts-statistic-service
+  labels:
+    app: posts-statistic-service
+spec:
+  serviceName: posts-statistic-service
+  # replicas MUST equal the post-events topic's partition count: each shard
+  # consumes exactly one partition, chosen by its ordinal. See README
+  # "Sharding & the producer contract".
+  replicas: 2
+  selector:
+    matchLabels:
+      app: posts-statistic-service
+  template:
+    metadata:
+      labels:
+        app: posts-statistic-service
+    spec:
+      containers:
+        - name: shard
+          image: posts-statistic-service:latest # replace with your registry path
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: internal
+              containerPort: 9090
+          env:
+            # SHARD_ORDINAL is intentionally NOT set here. shardOrdinal()
+            # (internal/app/app.go) derives it from POD_NAME's "-<ordinal>"
+            # suffix, which StatefulSet guarantees is stable — that's the
+            # whole reason this workload is a StatefulSet and not a
+            # Deployment (it needs no persistent volume otherwise: state
+            # lives in memory and in MinIO backups, not on local disk).
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: KAFKA_BROKERS
+              value: "kafka:9092" # space-separated if more than one
+            - name: KAFKA_TOPIC
+              value: "post-events"
+            - name: MINIO_ENDPOINT
+              value: "minio:9000"
+            - name: MINIO_BUCKET
+              value: "post-stats"
+            - name: SNAPSHOT_BACKUP_INTERVAL
+              value: "1h"
+            - name: LOG_LEVEL
+              value: "info"
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: posts-statistic-service-minio
+                  key: MINIO_ACCESS_KEY
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: posts-statistic-service-minio
+                  key: MINIO_SECRET_KEY
+          # /healthz is unconditional 200 (see handler.go:getLive) — only a
+          # truly hung process should fail this, so the budget here is short.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          # /readyz reflects real consumer lag — a shard still catching up
+          # reports 503 here, which is correct: it shouldn't take reads yet.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+          # Same endpoint as readinessProbe, but with a much larger budget.
+          # liveness/readiness are only evaluated once this succeeds, so a
+          # shard replaying its whole partition from scratch (no usable
+          # snapshot yet) won't get killed by livenessProbe mid-catch-up.
+          # periodSeconds * failureThreshold = 30 minutes; tune to your real
+          # replay volume.
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 180
+          resources:
+            requests:
+              memory: "256Mi" # ~10000 slots * ~90B, held twice (live store +
+              cpu: "100m"     # the snapshot buffer for each backup), plus Go
+                               # runtime and HTTP/Kafka client buffers.
+            limits:
+              memory: "256Mi" # requests == limits, as asked. No CPU limit on
+                               # purpose: a hard CPU limit throttles instead
+                               # of slowing down, which is worse for a Kafka
+                               # consumer trying to catch up.

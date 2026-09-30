@@ -1,0 +1,25 @@
+# Headless Service: DNS only, no load balancing, no external entry point.
+# It exists so StatefulSet pods get stable per-pod DNS names
+# (<name>-<ordinal>.<this-service>.<namespace>.svc.cluster.local) for
+# client-side shard routing — see README "Sharding & the producer contract".
+#
+# DO NOT put an Ingress in front of this Service, and do not change
+# clusterIP away from None. The `internal` port (/api/dump, /api/status,
+# /metrics) has no authentication of its own — see README "Ports".
+apiVersion: v1
+kind: Service
+metadata:
+  name: posts-statistic-service
+  labels:
+    app: posts-statistic-service
+spec:
+  clusterIP: None
+  selector:
+    app: posts-statistic-service
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+    - name: internal
+      port: 9090
+      targetPort: internal
