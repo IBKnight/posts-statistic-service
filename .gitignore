@@ -32,3 +32,6 @@ go.work.sum
 # .vscode/
 
 .DS_Store
+
+# local-only notes, not meant to be pushed
+ARCHITECTURE.md
