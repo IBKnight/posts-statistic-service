@@ -3,11 +3,20 @@ package storage
 import (
 	"fmt"
 	"sync"
+
+	"github.com/cespare/xxhash/v2"
 )
 
 const (
 	ShardSize  = 10000
 	BucketsNum = 10
+
+	// dedupWindow is how many recently-applied EventIDs each post remembers.
+	// Kafka is at-least-once and a crash replays everything since the last
+	// backup, so without this, a redelivered EventID would double-apply a
+	// non-idempotent op (Likes++) forever. 8 comfortably covers both producer
+	// retries (adjacent offsets) and the replay window after a restart.
+	dedupWindow = 8
 )
 
 type PostStats struct {
@@ -16,6 +25,21 @@ type PostStats struct {
 	Shares  uint32
 	Reports uint32
 	Exists  bool
+	Recent  [dedupWindow]uint64 // ring of xxhash(EventID) for recently-applied events
+}
+
+func (p *PostStats) seen(h uint64) bool {
+	for _, v := range p.Recent {
+		if v == h {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *PostStats) remember(h uint64) {
+	copy(p.Recent[1:], p.Recent[:dedupWindow-1])
+	p.Recent[0] = h
 }
 
 type Store struct {
@@ -39,6 +63,14 @@ func BaseIDForShard(ordinal int) int64 {
 	return int64(ordinal)*ShardSize + 1
 }
 
+// ShardForPostID is also the partitioning contract this service assumes of
+// its Kafka producer: partition N of the "post-events" topic must contain
+// exactly the events for which ShardForPostID(post_id) == N, and the topic
+// must have one partition per shard. If the producer partitions differently
+// (or the topic has fewer partitions than shards), events silently end up on
+// a shard that doesn't own them and get counted as "skipped" — see the
+// post_stats_events_skipped_total metric, which should be alerted on at any
+// sustained non-zero rate.
 func ShardForPostID(postID int64) int {
 	return int((postID - 1) / ShardSize)
 }
@@ -63,9 +95,17 @@ func (s *Store) bucket(i int) *sync.RWMutex {
 	return &s.buckets[i%BucketsNum]
 }
 
-func (s *Store) Apply(e Event) bool {
+type ApplyResult uint8
+
+const (
+	ApplyNotOwned ApplyResult = iota
+	ApplyDuplicate
+	ApplyOK
+)
+
+func (s *Store) Apply(e Event) ApplyResult {
 	if !s.Owns(e.PostID) {
-		return false
+		return ApplyNotOwned
 	}
 
 	i := s.index(e.PostID)
@@ -75,6 +115,11 @@ func (s *Store) Apply(e Event) bool {
 	defer mu.Unlock()
 
 	slot := &s.slots[i]
+
+	h := xxhash.Sum64String(e.EventID)
+	if slot.seen(h) {
+		return ApplyDuplicate
+	}
 
 	switch e.Type {
 	case EventView:
@@ -90,11 +135,14 @@ func (s *Store) Apply(e Event) bool {
 	case EventReport:
 		slot.Reports++
 	default:
-		return false
+		// Unreachable via the normal path: ParseEvent validates Type before
+		// Apply is ever called. Kept as a safe fallback for direct callers.
+		return ApplyNotOwned
 	}
 
+	slot.remember(h)
 	slot.Exists = true
-	return true
+	return ApplyOK
 }
 
 func (s *Store) Get(postID int64) (PostStats, bool) {

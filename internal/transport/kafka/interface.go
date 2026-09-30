@@ -8,7 +8,7 @@ import (
 )
 
 type Store interface {
-	Apply(e storage.Event) bool
+	Apply(e storage.Event) storage.ApplyResult
 	Snapshot(dst []storage.PostStats) []storage.PostStats
 	Restore(src []storage.PostStats) error
 	BaseID() int64

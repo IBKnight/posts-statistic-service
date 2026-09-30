@@ -36,11 +36,12 @@ type Consumer struct {
 	uploads     chan []byte
 	uploadsDone chan struct{}
 
-	lag      atomic.Int64
-	lagKnown atomic.Bool
-	applied  atomic.Uint64
-	skipped  atomic.Uint64
-	failed   atomic.Uint64
+	lag       atomic.Int64
+	lagKnown  atomic.Bool
+	applied   atomic.Uint64
+	skipped   atomic.Uint64
+	duplicate atomic.Uint64
+	failed    atomic.Uint64
 }
 
 func New(cfg Config, store Store, snaps Snapshots) (*Consumer, error) {
@@ -186,13 +187,16 @@ func (c *Consumer) handle(record *kgo.Record) {
 		return
 	}
 
-	if c.store.Apply(event) {
+	switch c.store.Apply(event) {
+	case storage.ApplyOK:
 		c.applied.Add(1)
-		return
+	case storage.ApplyDuplicate:
+		c.duplicate.Add(1)
+		slog.Debug("duplicate event ignored", "event_id", event.EventID, "post_id", event.PostID, "offset", record.Offset)
+	default:
+		c.skipped.Add(1)
+		slog.Debug("event does not belong to this shard", "post_id", event.PostID, "offset", record.Offset)
 	}
-
-	c.skipped.Add(1)
-	slog.Debug("event does not belong to this shard", "post_id", event.PostID, "offset", record.Offset)
 }
 
 func (c *Consumer) updateLag(highWatermark int64) {

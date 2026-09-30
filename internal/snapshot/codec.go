@@ -11,10 +11,12 @@ import (
 
 const (
 	magic   uint32 = 0x50535431
-	version uint32 = 1
+	version uint32 = 2
 
 	headerSize = 32
-	slotSize   = 17
+	// slotSize = 4 uint32 counters (16B) + Exists byte (1B) + 8 uint64 dedup
+	// hashes (64B) = 81B. Must match len(storage.PostStats{}.Recent).
+	slotSize = 17 + 8*8
 )
 
 var ErrNotFound = errors.New("snapshot not found")
@@ -43,6 +45,10 @@ func Encode(state State) ([]byte, error) {
 
 		if slot.Exists {
 			payload[off+16] = 1
+		}
+
+		for j, h := range slot.Recent {
+			binary.LittleEndian.PutUint64(payload[off+17+j*8:], h)
 		}
 	}
 
@@ -100,6 +106,10 @@ func Decode(data []byte) (State, error) {
 			Shares:  binary.LittleEndian.Uint32(payload[off+8:]),
 			Reports: binary.LittleEndian.Uint32(payload[off+12:]),
 			Exists:  payload[off+16] == 1,
+		}
+
+		for j := range slots[i].Recent {
+			slots[i].Recent[j] = binary.LittleEndian.Uint64(payload[off+17+j*8:])
 		}
 	}
 
